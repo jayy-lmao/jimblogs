@@ -6,11 +6,107 @@ author: jayy-lmao
 tags:
   - rustlang
 ---
-Placeholder because I'm defs writing 90% of this in vim
+
+## Background
+
+I'm at the point now where I am starting to want to use some tried-and-tested design & architecture patterns.
+It seems to make it easier for me to pickup where I left off, and also to communicate to others what the desired design was meant to look like (ideally).
+
+However, most of my work is on a Rust codebase. There happen to be very few examples of Rust servers beyond small hobby examples.
+The most production-ready I've found so far is probably [Hands-On Microservices with Rust](https://www.packtpub.com/product/hands-on-microservices-with-rust/9781789342758).
+Ultimately though, I've been looking for approaches to scalable architecture.
+
+I want some Rusty Domain-Driven Design (DDD).
+
+I attempted converting some of [Get Your Hands Dirty on Clean Architecture: A hands-on guide to creating clean web applications with code examples in Java](https://www.amazon.com/Hands-Dirty-Clean-Architecture-hands/dp/1839211962) to Rust a while back.
+
+Since then I've tried books on
+
+- F# DDD - [Scott Wlaschin's Domain Modeling Made Functional : Pragmatic Programmers: Tackle Software Complexity with Domain-Driven Design and F# ](https://www.amazon.com.au/Domain-Modeling-Made-Functional-Domain-Driven/dp/1680502549)
+- C# DDD - [Hands-On Domain-Driven Design with .NET Core](https://www.packtpub.com/product/hands-on-domain-driven-design-with-net-core/9781788834094)
+- Scala DDD - [Functional and Reactive Domain Modeling](https://www.manning.com/books/functional-and-reactive-domain-modeling)
+
+Obviously I've had some challenges converting any one of these, especially with the missing AsyncFn trait for async closures making async functional programming difficult (more to come).
+Also that `Traits` (think Interfaces / Abstract Classes sorta) don't like to be defined returning other traits (not at least without some wrangling).
+
+Every time I thought I had a language able to 1:1 convert to Rust, allowing me to steal from its years of rich architectural history I've been hit with a gotcha.
+I've developed some trust issues.
+
+But every now and then I have a little rust-specific breakthrough. Allow me to share the repository pattern I discovered while reading the Scala book recently.
+
+## Repository Pattern
+
+### Using a struct
+
+So for starters lets show why we cant use a struct for a repository.
+_Note: I'll be using Result<_> rather than Result<_,Err> and pretending we are using Anyhow or know our error types_
 
 ```rust
-#[async_trait::async_trait]
-pub trait Repository  {
-  fn name(&self) -> &str;
+/// An example entity
+struct Order {
+  id: String,
+  label: String,
+}
+
+struct OrderRepository;  // The hashmap/array/db conn might live in here.
+
+impl OrderRepository {
+  fn store(&self, order: Order) -> Result<()>
+  fn query(&self, id: String) -> Result<Order, ()>
+}
+
+// So we try a generic version
+struct GenericRepository<E>;  // There is no field with <E> in here. Might not be with something like a DB or mock, so then compiler will complain.
+
+impl GenericRepository<E> {
+  fn store(&self, entity: E) -> Result<()> {...} // forced to define the implementation of storage here
+  fn query(&self, id: String) -> Result<E, ()> {...}
 }
 ```
+
+Now we've got a couple of problems with this.
+
+1. Its specific only to order, we wont be able to recycle it for other entities
+2. We want more of an interface, so we can use it for either mock or database or in-memory etc.
+3. We cant change out order for a generic, because unless the type for that generic is inside the struct itself then compiler angery
+
+### Basic Repository Trait
+
+```rust
+// -- the order struct --
+
+trait Repository {
+  type Entity; // Associated type
+  type IdType; // Id might not always be a string
+
+  fn store(&self, entity: Self::Entity) -> Result<()>;
+  fn query(&self, id: Self::IdType) -> Result<Option<Self::Entity>>;
+}
+
+struct InMemoryOrderRepository {
+  orders: Arc<RwLock<HashMap<String, Order>>>
+}
+
+impl Repository for InMemoryOrderRepository {
+  type Entity = Order;
+  type IdType = String;
+
+  fn store(&self, entity: Self::Entity) -> Result<()> {
+    let orders = self.orders.write().await;
+    orders.insert(entity.id, entity)
+    Ok(())
+  }
+  fn query(&self, id: Self::IdType) -> Result<Option<Self::Entity>> {
+    let orders = self.orders.read().await;
+    let order = orders.get(entity.id);
+    Ok(order)
+  }
+
+}
+```
+
+### Querying Many? Non-Optional Querying?
+
+The above already gives us most of what we would need for repositories, but it's not super flexible.
+Maybe we need to throw an error when there's no result? Maybe we want to query for multiple values?
+
