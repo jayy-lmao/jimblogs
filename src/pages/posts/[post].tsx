@@ -8,7 +8,6 @@ import fs from "fs";
 import yaml from "js-yaml";
 import { parseISO } from 'date-fns';
 import PostLayout from "../../components/PostLayout";
-import SyntaxHighlighter from 'react-syntax-highlighter'
 
 import InstagramEmbed from "react-instagram-embed";
 import YouTube from "react-youtube";
@@ -24,7 +23,7 @@ export type Props = {
   source: MdxRemote.Source;
 };
 
-const components = { InstagramEmbed, YouTube, TwitterTweetEmbed, SyntaxHighlighter };
+const components = { InstagramEmbed, YouTube, TwitterTweetEmbed };
 const slugToPostContent = (postContents => {
   let hash = {}
   postContents.forEach(it => hash[it.slug] = it)

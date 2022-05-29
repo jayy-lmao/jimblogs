@@ -41,8 +41,8 @@ But every now and then I have a little rust-specific breakthrough. Allow me to s
 So for starters lets show why we cant use a struct for a repository.
 _Note: I'll be using Result<_> rather than Result<_,Err> and pretending we are using Anyhow or know our error types_
 
-<SyntaxHighlighter language="rust">
-{`/// An example entity
+```
+/// An example entity
 struct Order {
   id: String,
   label: String,
@@ -62,7 +62,7 @@ impl GenericRepository<E> {
 fn store(&self, entity: E) -> Result<()> {...} // forced to define the implementation of storage here
 fn query(&self, id: String) -> Result<E, ()> {...}
 }
-`}</SyntaxHighlighter>
+``` 
 
 Now we've got a couple of problems with this.
 
