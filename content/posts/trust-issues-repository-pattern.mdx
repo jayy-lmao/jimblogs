@@ -7,6 +7,8 @@ tags:
   - rustlang
 ---
 
+
+
 ## Background
 
 I'm at the point now where I am starting to want to use some tried-and-tested design & architecture patterns.
@@ -87,6 +89,7 @@ trait Repository {
 }
 
 struct InMemoryOrderRepository {
+  // Not going to focus on this too much, but here's how I do a mock in-memory db especially using tokio::RwLock in async
   orders: Arc<RwLock<HashMap<String, Order>>>
 }
 
@@ -123,7 +126,7 @@ trait Repository {
   fn store(&self, entity: Self::Entity) -> Result<()>;
   fn query_optional(&self, id: Self::IdType) -> Result<Option<Self::Entity>>;
   fn query(&self, id: Self::IdType) -> Result<Self::Entity> {
-    let entity = self.query_optional(id).map_err(Err(anyhow!("_Something_ is missing")))
+    let entity = self.query_optional(id).ok_or(Err(anyhow!("_Something_ is missing")))
     Ok(entity)
   }
 }
@@ -157,7 +160,7 @@ trait Repository {
   fn store(&self, entity: Self::Entity) -> Result<()>;
   fn query_optional(&self, id: Self::IdType) -> Result<Option<Self::Entity>>;
   fn query(&self, id: Self::IdType) -> Result<Self::Entity> {
-    let entity = self.query_optional(id).map_err(Err(anyhow!("Not found in {}", self.name())))
+    let entity = self.query_optional(id).ok_or(Err(anyhow!("Not found in {}", self.name())))
     Ok(entity)
   }
 }
@@ -193,6 +196,8 @@ From this I like to derive:
 - exists
 
 I really like this! I write one query and one insert and suddenly I get access to a few different ways of using the repo.
+
+### Querying Different Fields for an entity
 
 Only issue we have here is that we may want to query multiple fields? maybe we also want to query by label if it is unique?
 
@@ -239,7 +244,7 @@ trait BaseRepository {
   fn name(&str) -> &str;
 }
 
-trait RepositoryStore {
+trait RepositoryStore: BaseRepository {
   fn store(&self, id: Option<IdType>) -> Result<Self::Entity>;
 }
 
@@ -284,6 +289,7 @@ trait OrderRepository:
 {}
 ```
 
+
 But we still haven't solved the issue of having a query for id and a separate one for label?
 This can be easily resolved by using the newtype idiom (https://doc.rust-lang.org/rust-by-example/generics/new_types.html).
 I like to follow this idiom anyways for DDD reasons, so its no skin off my back!
@@ -317,6 +323,7 @@ struct Order {
 ```
 
 This means we can now have multiple different queries, for different fields!
+At a glance we can see for the following the entity is `Order`, and you are allowed to `store`, `query` for Id, `query` for label.
 
 ```rust
 trait OrderRepository:
@@ -357,6 +364,24 @@ let order_label = OrderLabel::new("some-order");
 let order = order_repository.query(order_label)?; // It will correctly use the implementation which takes OrderLabels instead of OrderIds! Woo!
 ```
 
+It also allows you to write functions or structs which can take the OrderRepository trait,
+meaning that you can pass in an `InMemoryOrderRepository` or a `MockOrderRepository` or `DbOrderRepository`
+so long as it implements the trait.
+E.g.
+
+```rust
+struct User {
+  name: String,
+  last_order: OrderId,
+}
+
+fn get_last_order_for_user(user: User, order_repository: impl OrderRepository) -> Result<Order>{
+  order_repository.query(user.last_order)
+}
+```
+
+This makes testing a breeze!
+
 Obviously this misses one case, where for certain fields you might do a query which takes one id/label/field and returns a vec but this could just be a different trait.
 
 ```rust
@@ -366,6 +391,9 @@ trait RepositoryOneToManyQuery<IdType>: BaseRepository {
 ```
 
 Or something of that nature.
+
+
+### Putting it all together
 
 In any case, the full final thing we've built is
 
@@ -382,7 +410,7 @@ trait BaseRepository {
   fn name(&str) -> &str;
 }
 
-trait RepositoryStore {
+trait RepositoryStore: BaseRepository {
   fn store(&self, id: Option<IdType>) -> Result<Self::Entity>;
 }
 
