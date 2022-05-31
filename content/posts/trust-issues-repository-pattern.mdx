@@ -42,10 +42,13 @@ So for starters lets show why we cant use a struct for a repository.
 _Note: I'll be using Result<_> rather than Result<_,Err> and pretending we are using Anyhow or know our error types_
 
 ```rust
+use anyhow::{Result, anyhow};
+
 /// An example entity
 struct Order {
   id: String,
   label: String,
+  description: String,
 }
 
 struct OrderRepository; // The hashmap/array/db conn might live in here.
@@ -62,7 +65,7 @@ impl GenericRepository<E> {
   fn store(&self, entity: E) -> Result<()> {...} // forced to define the implementation of storage here
   fn query(&self, id: String) -> Result<E, ()> {...}
 }
-``` 
+```
 
 Now we've got a couple of problems with this.
 
@@ -109,3 +112,353 @@ impl Repository for InMemoryOrderRepository {
 
 The above already gives us most of what we would need for repositories, but it's not super flexible.
 Maybe we need to throw an error when there's no result? Maybe we want to query for multiple values?
+
+The good news is that if we're able to leverage one of existing functions, then it will become available on anything which implmements `Repository`.
+
+```rust
+trait Repository {
+  type Entity; // Associated type
+  type IdType; // Id might not always be a string
+
+  fn store(&self, entity: Self::Entity) -> Result<()>;
+  fn query_optional(&self, id: Self::IdType) -> Result<Option<Self::Entity>>;
+  fn query(&self, id: Self::IdType) -> Result<Self::Entity> {
+    let entity = self.query_optional(id).map_err(Err(anyhow!("_Something_ is missing")))
+    Ok(entity)
+  }
+}
+
+
+impl Repository for InMemoryOrderRepository {
+  type Entity = Order;
+  type IdType = String;
+
+  fn store(&self, entity: Self::Entity) -> Result<()> {
+    // ...
+  }
+
+  // We've renamed this one to be query_optional. We will now get .query for freee!
+  fn query_optional(&self, id: Self::IdType) -> Result<Option<Self::Entity>> {
+    let orders = self.orders.read().await;
+    let order = orders.get(entity.id);
+    Ok(order)
+  }
+}
+```
+
+Lets just fix a few things so that we can actually work out what we're missing.
+
+```rust
+trait Repository {
+  type Entity; // Associated type
+  type IdType; // Id might not always be a string
+
+  fn name(&self) -> &str;
+  fn store(&self, entity: Self::Entity) -> Result<()>;
+  fn query_optional(&self, id: Self::IdType) -> Result<Option<Self::Entity>>;
+  fn query(&self, id: Self::IdType) -> Result<Self::Entity> {
+    let entity = self.query_optional(id).map_err(Err(anyhow!("Not found in {}", self.name())))
+    Ok(entity)
+  }
+}
+
+impl Repository for InMemoryOrderRepository {
+  type Entity = Order;
+  type IdType = String;
+
+  fn name(&self) -> &str {
+    "orders"
+  }
+
+  fn store(&self, entity: Self::Entity) -> Result<()> {
+    // ...
+  }
+  fn query_optional(&self, id: Self::IdType) -> Result<Option<Self::Entity>> {
+    //...
+  }
+
+}
+```
+
+Personally, what I've found to be the most useful function to have in the implementation is:
+
+```rust
+fn query_many(&self, ids: Vec<Self::IdType>) -> Result<Vec<Self::Entity>>;
+```
+
+From this I like to derive:
+
+- query_optional
+- query (throw error if not found)
+- exists
+
+I really like this! I write one query and one insert and suddenly I get access to a few different ways of using the repo.
+
+Only issue we have here is that we may want to query multiple fields? maybe we also want to query by label if it is unique?
+
+We cant write this:
+
+```rust
+impl Repository for InMemoryOrderRepository {
+  type Entity = Order;
+  type IdType = String; // this time we mean label
+
+  // all that other stuff
+}
+```
+
+Because of two reasons:
+
+- Cant impl the same trait twice on the same struct
+- Even if we were allowed to the ID type of both is string, how would it know which `order_repository.query(_)` to run?
+
+Here's a hot strat: We move the ID type to a generic
+
+```rust
+trait Repository<IdType> {
+  type Entity; // Associated type
+  fn query_many(&self, id: Vec<IdType>) -> Result<Vec<Self::Entity>>;
+
+    // ...other stuff
+
+}
+
+impl Repository<String> for InMemoryOrderRepository {
+  type Entity = Order;
+
+  // all that other stuff
+}
+```
+
+We're still not quite allowed to do this so lets split it up into two parts to make the compiler happy:
+
+```rust
+trait BaseRepository {
+  type Entity;
+
+  fn name(&str) -> &str;
+}
+
+trait RepositoryStore {
+  fn store(&self, id: Option<IdType>) -> Result<Self::Entity>;
+}
+
+trait RepositoryQuery<IdType>: BaseRepository {
+  fn query_many(&self, id: Vec<IdType>) -> Result<Vec<Self::Entity>>;
+  fn query_optional(&self, id: IdType) -> Result<Option<Self::Entity>> {
+    let entity = self.query_many(vec![id])?.pop();
+    Ok(entity)
+  }
+  fn query(&self, id: Option<IdType>) -> Result<Self::Entity> {
+    let entity = self.query_many(vec![id])?.pop().ok_or(Err(anyhow!("not found in {}", self.name())));
+    Ok(entity)
+  }
+
+}
+
+impl BaseRepository for InMemoryOrderRepository {
+  type Entity = Order;
+  fn name(&str) -> &str {
+    "orders"
+  }
+}
+impl RepositoryStore for InMemoryOrderRepository {
+  // a store function
+}
+
+impl RepositoryQuery<String> for InMemoryOrderRepository {
+    fn query_many(&self, id: Vec<IdType>) -> Result<Vec<Self::Entity>> {
+      /* implmentation */
+    }
+}
+
+```
+
+Personally for readability I like to define a trait for the whole repository just so that I know what has been implemented, and can refer to the repository by its trait if need be.
+
+```rust
+trait OrderRepository:
+  BaseRepository<Enitity = Order>
+  + RepositoryStore
+  + RepositoryQuery<String>
+{}
+```
+
+But we still haven't solved the issue of having a query for id and a separate one for label?
+This can be easily resolved by using the newtype idiom (https://doc.rust-lang.org/rust-by-example/generics/new_types.html).
+I like to follow this idiom anyways for DDD reasons, so its no skin off my back!
+
+```rust
+struct OrderId(String); // Some examples just have this line
+impl OrderId {
+  pub fn new(id: impl Into<String>) {
+    Self(id.into()) // But I like to have constructor for simple validation
+  }
+  pub fn value(&self) -> String {
+    self.0
+  }
+}
+
+struct OrderLabel(String);
+impl OrderLabel {
+  pub fn new(label: impl Into<String>) {
+    Self(id.into())
+  }
+  pub fn value(&self) -> String {
+    self.0
+  }
+}
+
+struct Order {
+  id: OrderId,
+  label: OrderLabel,
+  description: String,
+}
+```
+
+This means we can now have multiple different queries, for different fields!
+
+```rust
+trait OrderRepository:
+  BaseRepository<Enitity = Order>
+  + RepositoryStore
+  + RepositoryQuery<OrderId>
+  + RepositoryQuery<OrderLabel>
+{}
+
+impl OrderRepository for InMemoryOrderRepository {} // This will make sure all the above inhereted traits are happy
+
+impl BaseRepository for InMemoryOrderRepository {
+  /*all that good stuff*/
+}
+impl RepositoryQuery<OrderId> for InMemoryOrderRepository {
+  fn query_many(&self, ids: Vec<OrderId>) -> Result<Vec<Self::Entity>> {
+    /* implementation */
+  }
+}
+impl RepositoryQuery<OrderLabel> for InMemoryOrderRepository {
+  fn query_many(&self, ids: Vec<OrderLabel>) -> Result<Vec<Self::Entity>> {
+    /* implementation */
+  }
+}
+```
+
+Isn't that delightful! Means you can now write:
+
+```rust
+
+// Inside of a function somewhere
+
+let order_repository = InMemoryOrderRepository::new();
+
+// we get access to
+let order_label = OrderLabel::new("some-order");
+
+let order = order_repository.query(order_label)?; // It will correctly use the implementation which takes OrderLabels instead of OrderIds! Woo!
+```
+
+Obviously this misses one case, where for certain fields you might do a query which takes one id/label/field and returns a vec but this could just be a different trait.
+
+```rust
+trait RepositoryOneToManyQuery<IdType>: BaseRepository {
+  fn query_optional(&self, id: IdType) -> Result<Vec<Self::Entity>;
+}
+```
+
+Or something of that nature.
+
+In any case, the full final thing we've built is
+
+```rust
+use anyhow::{Result, anyhow};
+
+// ==================================================
+// All the abstract stuff
+// ==================================================
+
+trait BaseRepository {
+  type Entity;
+
+  fn name(&str) -> &str;
+}
+
+trait RepositoryStore {
+  fn store(&self, id: Option<IdType>) -> Result<Self::Entity>;
+}
+
+
+trait RepositoryQuery<IdType>: BaseRepository { // Implements/inherits from base repository
+  fn query_many(&self, id: Vec<IdType>) -> Result<Vec<Self::Entity>>;
+  fn query_optional(&self, id: IdType) -> Result<Option<Self::Entity>> {
+    let entity = self.query_many(vec![id])?.pop();
+    Ok(entity)
+  }
+  fn query(&self, id: Option<IdType>) -> Result<Self::Entity> {
+    let entity = self.query_many(vec![id])?.pop().ok_or(Err(anyhow!("not found in {}", self.name())));
+    Ok(entity)
+  }
+}
+
+
+// ==================================================
+// The domain model
+// ==================================================
+
+struct OrderId(String); // Some examples just have this line
+impl OrderId {
+  pub fn new(id: impl Into<String>) {
+    Self(id.into()) // But I like to have constructor for simple validation
+  }
+  pub fn value(&self) -> String {
+    self.0
+  }
+}
+
+struct OrderLabel(String);
+impl OrderLabel {
+  pub fn new(label: impl Into<String>) {
+    Self(id.into())
+  }
+  pub fn value(&self) -> String {
+    self.0
+  }
+}
+
+struct Order {
+  id: OrderId,
+  label: OrderLabel,
+  description: String,
+}
+
+// ==================================================
+// The persistence layer
+// ==================================================
+
+trait OrderRepository:
+  BaseRepository<Enitity = Order>
+  + RepositoryStore
+  + RepositoryQuery<OrderId>
+  + RepositoryQuery<OrderLabel>
+{}
+
+impl OrderRepository for InMemoryOrderRepository {} // This will make sure all the above inhereted traits are happy
+
+impl BaseRepository for InMemoryOrderRepository {
+  type Entity = order;
+  fn name(*self) -> { "orders" }
+}
+impl RepositoryStore for InMemoryOrderRepository {
+  type Entity = order;
+  fn name(*self) -> { "orders" }
+}
+impl RepositoryQuery<OrderId> for InMemoryOrderRepository {
+  fn query_many(&self, ids: Vec<OrderLabel>) -> Result<Vec<Self::Entity>> {
+    /* implementation */
+  }
+}
+impl RepositoryQuery<OrderLabel> for InMemoryOrderRepository {
+  fn query_many(&self, ids: Vec<OrderLabel>) -> Result<Vec<Self::Entity>> {
+    /* implementation */
+  }
+}
+```
